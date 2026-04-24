@@ -6,62 +6,62 @@ import (
 	"os"
 )
 
-// Config holds sync configuration for environments.
+// EnvConfig holds per-environment vault settings.
+type EnvConfig struct {
+	// VaultPath is the file-system path to the encrypted vault file.
+	VaultPath string `json:"vault_path"`
+	// PassphraseEnv is the name of the environment variable that holds the
+	// passphrase used to encrypt / decrypt this vault.
+	PassphraseEnv string `json:"passphrase_env"`
+}
+
+// Config is the top-level structure stored in envoy.json.
 type Config struct {
 	Environments map[string]EnvConfig `json:"environments"`
 }
 
-// EnvConfig holds per-environment vault settings.
-type EnvConfig struct {
-	VaultPath  string `json:"vault_path"`
-	PassEnvVar string `json:"pass_env_var"`
-}
-
-// DefaultConfigPath is the default location for the sync config file.
-const DefaultConfigPath = ".envoy/sync.json"
-
-// LoadConfig reads a Config from the given JSON file path.
-func LoadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
+// LoadConfig reads and parses an envoy.json file from disk.
+func LoadConfig(path string) (Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
+		if os.IsNotExist(err) {
+			return Config{}, fmt.Errorf("config file not found: %s", path)
+		}
+		return Config{}, fmt.Errorf("reading config: %w", err)
 	}
-	defer f.Close()
 
 	var cfg Config
-	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("load config: decode: %w", err)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parsing config: %w", err)
 	}
-	return &cfg, nil
+	return cfg, nil
 }
 
-// SaveConfig writes a Config to the given JSON file path.
-func SaveConfig(path string, cfg *Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("save config: mkdir: %w", err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+// SaveConfig serialises cfg to JSON and writes it to path.
+func SaveConfig(path string, cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("save config: open: %w", err)
+		return fmt.Errorf("serialising config: %w", err)
 	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(cfg); err != nil {
-		return fmt.Errorf("save config: encode: %w", err)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("writing config: %w", err)
 	}
 	return nil
 }
 
-// Passphrase resolves the passphrase for an EnvConfig from the environment.
-func (e *EnvConfig) Passphrase() (string, error) {
-	if e.PassEnvVar == "" {
-		return "", fmt.Errorf("passphrase: pass_env_var not set")
+// PassphraseFor resolves the passphrase for the given environment by reading
+// the environment variable named in EnvConfig.PassphraseEnv.
+func PassphraseFor(cfg Config, env string) (string, error) {
+	ec, ok := cfg.Environments[env]
+	if !ok {
+		return "", fmt.Errorf("unknown environment %q", env)
 	}
-	val := os.Getenv(e.PassEnvVar)
+	if ec.PassphraseEnv == "" {
+		return "", fmt.Errorf("no passphrase_env configured for environment %q", env)
+	}
+	val := os.Getenv(ec.PassphraseEnv)
 	if val == "" {
-		return "", fmt.Errorf("passphrase: env var %q is empty or unset", e.PassEnvVar)
+		return "", fmt.Errorf("environment variable %s is not set or empty", ec.PassphraseEnv)
 	}
 	return val, nil
 }
