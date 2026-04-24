@@ -2,7 +2,7 @@ package vault
 
 import "sort"
 
-// Keys returns a sorted slice of all keys currently stored in the vault.
+// Keys returns a sorted slice of all key names stored in the vault.
 func (v *Vault) Keys() []string {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
