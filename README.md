@@ -45,6 +45,11 @@ List available environments and their sync status:
 envoy status
 ```
 
+Compare variables between two environments:
+```bash
+envoy diff --from staging --to production
+```
+
 ---
 
 ## How It Works
