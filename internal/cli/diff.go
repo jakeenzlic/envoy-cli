@@ -10,6 +10,8 @@ import (
 )
 
 // NewDiffCmd returns a cobra command that shows differences between two environment vaults.
+// Usage: envoy diff <env-a> <env-b>
+// It loads both vaults using their respective passphrases and prints any key-level differences.
 func NewDiffCmd() *cobra.Command {
 	var configPath string
 
@@ -54,7 +56,7 @@ func NewDiffCmd() *cobra.Command {
 				return nil
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Differences (%s → %s):\n", envA, envB)
+			fmt.Fprintf(cmd.OutOrStdout(), "Differences (%s → %s): %d\n", envA, envB, len(diffs))
 			for _, d := range diffs {
 				fmt.Fprintln(cmd.OutOrStdout(), d)
 			}
