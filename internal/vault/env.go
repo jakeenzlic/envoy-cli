@@ -10,6 +10,7 @@ import (
 // ImportEnvFile reads a .env file and loads its key-value pairs into the vault.
 // Lines starting with '#' and empty lines are ignored.
 // Inline comments (after a value) are stripped.
+// Quoted values (single or double) have their surrounding quotes removed.
 func (v *Vault) ImportEnvFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -30,6 +31,9 @@ func (v *Vault) ImportEnvFile(path string) error {
 			return fmt.Errorf("vault: invalid syntax at line %d: %q", lineNum, line)
 		}
 		key := strings.TrimSpace(parts[0])
+		if key == "" {
+			return fmt.Errorf("vault: empty key at line %d: %q", lineNum, line)
+		}
 		value := stripInlineComment(strings.TrimSpace(parts[1]))
 		value = strings.Trim(value, `"'`)
 		v.Set(key, value)
