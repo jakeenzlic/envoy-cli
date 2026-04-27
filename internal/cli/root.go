@@ -1,22 +1,29 @@
 package cli
 
-import (
-	"github.com/spf13/cobra"
-)
+import "github.com/spf13/cobra"
 
-// NewRootCmd builds and returns the root cobra command with all sub-commands registered.
+// NewRootCmd builds the top-level cobra command and registers all sub-commands.
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "envoy",
 		Short: "Manage and sync .env files across environments using encrypted vaults",
-		Long: `envoy-cli helps you securely manage environment variables across
-local, staging, and production environments using encrypted vaults.`,
 	}
 
-	root.AddCommand(NewInitCmd())
-	root.AddCommand(NewPushCmd())
-	root.AddCommand(NewPullCmd())
-	root.AddCommand(NewDiffCmd())
+	root.AddCommand(
+		NewInitCmd(),
+		NewPushCmd(),
+		NewPullCmd(),
+		NewDiffCmd(),
+		NewListCmd(),
+		NewSetCmd(),
+		NewGetCmd(),
+		NewDeleteCmd(),
+		NewImportCmd(),
+		NewExportCmd(),
+		NewCopyCmd(),
+		NewRotateCmd(),
+		NewRenameCmd(),
+	)
 
 	return root
 }
