@@ -1,109 +1,108 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
-	"os"
-	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"envoy-cli/internal/vault"
 )
 
-// NewRollbackCmd returns a command that restores a vault to a previously
-// recorded history snapshot. It reads the history log, lets the user
-// pick a revision by index, and re-applies every key/value pair that
-// was captured at that point in time.
+// NewRollbackCmd returns a cobra command that reverts a key to its previous
+// value by reading the most recent history entry for that key.
 func NewRollbackCmd() *cobra.Command {
 	var (
-		envName string
-		yesFlag bool
+		cfgPath string
+		env     string
+		key     string
+		yes     bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "rollback <revision>",
-		Short: "Restore a vault to a previous history snapshot",
-		Long: `Rollback replaces the current vault contents with the key/value
-pairs captured in the specified history revision.
-
-Revision numbers are shown by the 'history' command (0 = most recent).`,
-		Args: cobra.ExactArgs(1),
+		Use:   "rollback",
+		Short: "Revert a key to its previous value using history",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			revStr := args[0]
-			revIdx, err := strconv.Atoi(revStr)
-			if err != nil || revIdx < 0 {
-				return fmt.Errorf("revision must be a non-negative integer, got %q", revStr)
-			}
-
-			cfg, err := loadCfgForCmd(cmd)
+			cfg, err := loadCfgForCmd(cfgPath)
 			if err != nil {
 				return err
 			}
 
-			passphrase, err := passphraseForCmd(cmd, cfg, envName)
+			pass, err := passphraseForCmd(cfg, env)
 			if err != nil {
 				return err
 			}
 
-			// Load history entries for the target environment.
-			hPath := historyPath(cmd, envName)
-			entries, err := loadHistory(hPath)
+			envcfg, ok := cfg.Environments[env]
+			if !ok {
+				return fmt.Errorf("environment %q not found in config", env)
+			}
+
+			// Determine history directory from config file location.
+			histDir := historyDirFromConfig(cfgPath)
+			entries, err := loadHistory(histDir, env)
 			if err != nil {
-				return fmt.Errorf("could not load history: %w", err)
-			}
-			if len(entries) == 0 {
-				return fmt.Errorf("no history found for environment %q", envName)
+				return fmt.Errorf("load history: %w", err)
 			}
 
-			if revIdx >= len(entries) {
-				return fmt.Errorf("revision %d out of range (history has %d entries)", revIdx, len(entries))
+			entry, found := lastEntryForKey(entries, key)
+			if !found {
+				return fmt.Errorf("no history entry found for key %q in env %q", key, env)
 			}
 
-			// History is stored newest-first; index 0 is the latest snapshot.
-			target := entries[revIdx]
-			if len(target.Keys) == 0 {
-				return fmt.Errorf("revision %d contains no key snapshot; cannot rollback", revIdx)
-			}
-
-			if !yesFlag {
+			if !yes {
 				fmt.Fprintf(cmd.OutOrStdout(),
-					"Rolling back %q to revision %d (%s) will overwrite %d key(s).\nContinue? [y/N] ",
-					envName, revIdx, target.Timestamp, len(target.Keys))
+					"Revert %s from %q to %q? [y/N] ",
+					key, entry.NewValue, entry.OldValue)
 				var answer string
-				fmt.Fscan(os.Stdin, &answer)
-				if answer != "y" && answer != "Y" {
+				_, _ = fmt.Fscan(cmd.InOrStdin(), &answer)
+				if !strings.EqualFold(strings.TrimSpace(answer), "y") {
 					fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 					return nil
 				}
 			}
 
-			// Open (or create) the vault for the target environment.
-			vaultPath := vaultPathForEnv(cfg, envName)
-			v, err := openVaultForEnv(vaultPath, passphrase)
+			v, err := vault.New(envcfg.VaultPath, pass)
 			if err != nil {
-				return fmt.Errorf("could not open vault: %w", err)
+				return fmt.Errorf("open vault: %w", err)
+			}
+			if err := v.Set(key, entry.OldValue); err != nil {
+				return fmt.Errorf("set key: %w", err)
+			}
+			if err := v.Save(); err != nil {
+				return fmt.Errorf("save vault: %w", err)
 			}
 
-			// Overwrite every key captured in the snapshot.
-			for k, val := range target.Keys {
-				if err := v.Set(k, val); err != nil {
-					return fmt.Errorf("failed to set %q: %w", k, err)
-				}
-			}
+			// Record the rollback itself in history.
+			_ = AppendHistory(histDir, env, key, entry.NewValue, entry.OldValue)
 
-			if err := v.Save(vaultPath, passphrase); err != nil {
-				return fmt.Errorf("failed to save vault: %w", err)
-			}
-
-			// Record the rollback action in history.
-			_ = AppendHistory(hPath, "rollback", envName, target.Keys)
-
-			fmt.Fprintf(cmd.OutOrStdout(),
-				"Rolled back %q to revision %d (%s) — %d key(s) restored.\n",
-				envName, revIdx, target.Timestamp, len(target.Keys))
+			fmt.Fprintf(cmd.OutOrStdout(), "Rolled back %s to %q\n", key, entry.OldValue)
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVarP(&envName, "env", "e", "local", "Target environment")
-	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "Skip confirmation prompt")
+	cmd.Flags().StringVar(&cfgPath, "config", "envoy.json", "path to envoy config")
+	cmd.Flags().StringVar(&env, "env", "local", "target environment")
+	cmd.Flags().StringVar(&key, "key", "", "key to roll back (required)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip confirmation prompt")
+	_ = cmd.MarkFlagRequired("key")
 	return cmd
+}
+
+// lastEntryForKey scans entries in reverse and returns the most recent one
+// whose Key matches. Returns an error-sentinel bool when not found.
+func lastEntryForKey(entries []HistoryEntry, key string) (HistoryEntry, bool) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Key == key {
+			return entries[i], true
+		}
+	}
+	return HistoryEntry{}, false
+}
+
+// historyDirFromConfig derives the history directory from the config path.
+func historyDirFromConfig(cfgPath string) string {
+	_ = errors.New("") // keep import used
+	return historyPath(cfgPath, "")
 }

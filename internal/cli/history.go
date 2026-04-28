@@ -1,100 +1,137 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
-// HistoryEntry records a single mutation event on a vault key.
+// HistoryEntry records a single key mutation.
 type HistoryEntry struct {
 	Timestamp time.Time `json:"timestamp"`
-	Environment string    `json:"environment"`
+	Env       string    `json:"env"`
 	Key       string    `json:"key"`
-	Action    string    `json:"action"` // set | delete | rotate | import
+	OldValue  string    `json:"old_value"`
+	NewValue  string    `json:"new_value"`
 }
 
-// historyPath returns the path to the history log file.
-func historyPath(cfgDir string) string {
-	return filepath.Join(cfgDir, ".envoy_history.json")
+// HistoryPath returns the path to the history file for the given env,
+// stored relative to the config file directory.
+func HistoryPath(baseDir, env string) string {
+	return filepath.Join(baseDir, ".envoy_history", env+".jsonl")
 }
 
-// AppendHistory appends a new entry to the history log.
-func AppendHistory(cfgDir, env, key, action string) error {
-	entries, _ := loadHistory(cfgDir)
-	entries = append(entries, HistoryEntry{
-		Timestamp:   time.Now().UTC(),
-		Environment: env,
-		Key:         key,
-		Action:      action,
-	})
-	data, err := json.MarshalIndent(entries, "", "  ")
+// historyPath is the internal helper used by other CLI commands.
+func historyPath(cfgPath, env string) string {
+	base := filepath.Dir(cfgPath)
+	if env == "" {
+		return filepath.Join(base, ".envoy_history")
+	}
+	return HistoryPath(base, env)
+}
+
+// AppendHistory appends a single entry to the history file for the given env.
+func AppendHistory(histDir, env, key, oldVal, newVal string) error {
+	hp := HistoryPath(histDir, env)
+	if err := os.MkdirAll(filepath.Dir(hp), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(hp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(historyPath(cfgDir), data, 0600)
+	defer f.Close()
+	entry := HistoryEntry{
+		Timestamp: time.Now().UTC(),
+		Env:       env,
+		Key:       key,
+		OldValue:  oldVal,
+		NewValue:  newVal,
+	}
+	return json.NewEncoder(f).Encode(entry)
 }
 
-func loadHistory(cfgDir string) ([]HistoryEntry, error) {
-	data, err := os.ReadFile(historyPath(cfgDir))
+// loadHistory reads all history entries for an env from the given base dir.
+func loadHistory(baseDir, env string) ([]HistoryEntry, error) {
+	hp := HistoryPath(baseDir, env)
+	f, err := os.Open(hp)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return []HistoryEntry{}, nil
-		}
 		return nil, err
 	}
+	defer f.Close()
+
 	var entries []HistoryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, err
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var e HistoryEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		entries = append(entries, e)
 	}
-	return entries, nil
+	return entries, scanner.Err()
 }
 
-// NewHistoryCmd returns the `history` sub-command.
+// NewHistoryCmd returns a cobra command for viewing key mutation history.
 func NewHistoryCmd() *cobra.Command {
-	var envFilter string
-	var limit int
+	var (
+		cfgPath string
+		env     string
+		limit   int
+	)
 
 	cmd := &cobra.Command{
 		Use:   "history",
-		Short: "Show recent vault mutation history",
+		Short: "Show mutation history for an environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadCfgForCmd(cmd)
+			histDir := historyPath(cfgPath, "")
+			entries, err := loadHistory(histDir, env)
 			if err != nil {
-				return err
+				return fmt.Errorf("load history: %w", err)
 			}
-			cfgDir := filepath.Dir(cfg.ConfigPath)
-			entries, err := loadHistory(cfgDir)
-			if err != nil {
-				return fmt.Errorf("reading history: %w", err)
-			}
-			var filtered []HistoryEntry
-			for _, e := range entries {
-				if envFilter == "" || e.Environment == envFilter {
-					filtered = append(filtered, e)
-				}
-			}
-			if len(filtered) == 0 {
+			if len(entries) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No history found.")
 				return nil
 			}
 			start := 0
-			if limit > 0 && len(filtered) > limit {
-				start = len(filtered) - limit
+			if limit > 0 && len(entries) > limit {
+				start = len(entries) - limit
 			}
-			for _, e := range filtered[start:] {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s  [%s] %-8s %s\n",
-					e.Timestamp.Format(time.RFC3339), e.Environment, e.Action, e.Key)
+			for _, e := range entries[start:] {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s  [%s] %s: %s -> %s\n",
+					e.Timestamp.Format(time.RFC3339),
+					e.Env, e.Key,
+					quotedOrEmpty(e.OldValue),
+					quotedOrEmpty(e.NewValue),
+				)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&envFilter, "env", "", "Filter by environment name")
-	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of entries to show (0 = all)")
-	cmd.Flags().String("config", "envoy.json", "Path to envoy config file")
+
+	cmd.Flags().StringVar(&cfgPath, "config", "envoy.json", "path to envoy config")
+	cmd.Flags().StringVar(&env, "env", "local", "environment to show history for")
+	cmd.Flags().IntVar(&limit, "limit", 0, "max entries to show (0 = all)")
 	return cmd
+}
+
+func quotedOrEmpty(s string) string {
+	if s == "" {
+		return "(empty)"
+	}
+	return strconv.Quote(s)
 }

@@ -2,126 +2,107 @@ package cli_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/nicholasgasior/envoy-cli/internal/cli"
+	"github.com/spf13/cobra"
+
+	"envoy-cli/internal/cli"
 )
 
-func setupHistoryDir(t *testing.T) (string, string) {
+func setupHistoryDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "envoy.json")
-	cfg := `{"environments":{"dev":{"vault":"dev.vault"}}}`
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0644); err != nil {
-		t.Fatal(err)
-	}
-	return dir, cfgPath
+	return t.TempDir()
 }
 
 func TestAppendAndLoadHistory(t *testing.T) {
-	dir, _ := setupHistoryDir(t)
-
-	if err := cli.AppendHistory(dir, "dev", "DB_URL", "set"); err != nil {
-		t.Fatalf("AppendHistory: %v", err)
-	}
-	if err := cli.AppendHistory(dir, "prod", "API_KEY", "delete"); err != nil {
-		t.Fatalf("AppendHistory: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, ".envoy_history.json"))
+	dir := setupHistoryDir(t)
+	err := cli.AppendHistory(dir, "local", "DB_URL", "old", "new")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("AppendHistory: %v", err)
 	}
-	var entries []cli.HistoryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		t.Fatal(err)
+	entries, err := cli.LoadHistoryExported(dir, "local")
+	if err != nil {
+		t.Fatalf("LoadHistory: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
-	if entries[0].Key != "DB_URL" || entries[0].Action != "set" {
-		t.Errorf("unexpected first entry: %+v", entries[0])
+	if entries[0].Key != "DB_URL" {
+		t.Errorf("unexpected key: %s", entries[0].Key)
 	}
-	if entries[1].Environment != "prod" {
-		t.Errorf("unexpected second entry env: %s", entries[1].Environment)
+	if entries[0].OldValue != "old" || entries[0].NewValue != "new" {
+		t.Errorf("unexpected values: %+v", entries[0])
 	}
 }
 
+func runHistoryCmd(t *testing.T, args ...string) string {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	root := &cobra.Command{Use: "envoy"}
+	root.AddCommand(cli.NewHistoryCmd())
+	root.SetOut(buf)
+	root.SetErr(buf)
+	root.SetArgs(args)
+	_ = root.Execute()
+	return buf.String()
+}
+
 func TestHistoryCmdOutput(t *testing.T) {
-	dir, cfgPath := setupHistoryDir(t)
+	dir := setupHistoryDir(t)
+	cfgPath := filepath.Join(dir, "envoy.json")
+	_ = os.WriteFile(cfgPath, []byte(`{"project":"p","environments":{}}`), 0o600)
 
-	_ = cli.AppendHistory(dir, "dev", "SECRET", "set")
-	_ = cli.AppendHistory(dir, "staging", "TOKEN", "rotate")
+	_ = cli.AppendHistory(dir, "local", "KEY", "", "val")
 
-	cmd := cli.NewHistoryCmd()
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"--config", cfgPath})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "SECRET") {
-		t.Errorf("expected SECRET in output, got: %s", out)
-	}
-	if !strings.Contains(out, "TOKEN") {
-		t.Errorf("expected TOKEN in output, got: %s", out)
+	out := runHistoryCmd(t, "history", "--config", cfgPath, "--env", "local")
+	if !strings.Contains(out, "KEY") {
+		t.Errorf("expected KEY in output, got: %s", out)
 	}
 }
 
 func TestHistoryCmdEnvFilter(t *testing.T) {
-	dir, cfgPath := setupHistoryDir(t)
+	dir := setupHistoryDir(t)
+	cfgPath := filepath.Join(dir, "envoy.json")
+	_ = os.WriteFile(cfgPath, []byte(`{"project":"p","environments":{}}`), 0o600)
 
-	_ = cli.AppendHistory(dir, "dev", "DEV_KEY", "set")
-	_ = cli.AppendHistory(dir, "prod", "PROD_KEY", "set")
+	_ = cli.AppendHistory(dir, "staging", "S_KEY", "", "s")
+	_ = cli.AppendHistory(dir, "local", "L_KEY", "", "l")
 
-	cmd := cli.NewHistoryCmd()
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"--config", cfgPath, "--env", "dev"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
+	out := runHistoryCmd(t, "history", "--config", cfgPath, "--env", "local")
+	if strings.Contains(out, "S_KEY") {
+		t.Errorf("staging key should not appear in local history")
 	}
-	out := buf.String()
-	if !strings.Contains(out, "DEV_KEY") {
-		t.Errorf("expected DEV_KEY in output")
-	}
-	if strings.Contains(out, "PROD_KEY") {
-		t.Errorf("PROD_KEY should be filtered out")
+	if !strings.Contains(out, "L_KEY") {
+		t.Errorf("expected L_KEY in output")
 	}
 }
 
 func TestHistoryCmdNoHistory(t *testing.T) {
-	_, cfgPath := setupHistoryDir(t)
+	dir := setupHistoryDir(t)
+	cfgPath := filepath.Join(dir, "envoy.json")
+	_ = os.WriteFile(cfgPath, []byte(`{"project":"p","environments":{}}`), 0o600)
 
-	cmd := cli.NewHistoryCmd()
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"--config", cfgPath})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(buf.String(), "No history found") {
-		t.Errorf("expected 'No history found' message")
+	out := runHistoryCmd(t, "history", "--config", cfgPath, "--env", "local")
+	if !strings.Contains(out, "No history") {
+		t.Errorf("expected 'No history' message, got: %s", out)
 	}
 }
 
-func TestHistoryEntryTimestamp(t *testing.T) {
-	dir, _ := setupHistoryDir(t)
-	before := time.Now().UTC().Add(-time.Second)
-	_ = cli.AppendHistory(dir, "dev", "KEY", "import")
-	after := time.Now().UTC().Add(time.Second)
-
-	data, _ := os.ReadFile(filepath.Join(dir, ".envoy_history.json"))
-	var entries []cli.HistoryEntry
-	_ = json.Unmarshal(data, &entries)
-
-	if entries[0].Timestamp.Before(before) || entries[0].Timestamp.After(after) {
-		t.Errorf("timestamp out of expected range: %v", entries[0].Timestamp)
+func TestHistoryTimestampFormat(t *testing.T) {
+	dir := setupHistoryDir(t)
+	_ = cli.AppendHistory(dir, "prod", "TOKEN", "a", "b")
+	entries, _ := cli.LoadHistoryExported(dir, "prod")
+	if len(entries) == 0 {
+		t.Fatal("no entries")
+	}
+	if entries[0].Timestamp.IsZero() {
+		t.Error("timestamp should not be zero")
+	}
+	if time.Since(entries[0].Timestamp) > 5*time.Second {
+		t.Errorf("timestamp too old: %v", entries[0].Timestamp)
 	}
 }

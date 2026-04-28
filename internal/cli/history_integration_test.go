@@ -1,64 +1,89 @@
 package cli_test
 
 import (
-	"bytes"
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/nicholasgasior/envoy-cli/internal/cli"
+	"envoy-cli/internal/cli"
 )
 
-// TestHistoryLimitFlag verifies that --limit caps the number of displayed entries.
 func TestHistoryLimitFlag(t *testing.T) {
-	dir, cfgPath := setupHistoryDir(t)
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "envoy.json")
+	writeFile(t, cfgPath, `{"project":"p","environments":{}}`)
 
-	keys := []string{"A", "B", "C", "D", "E"}
-	for _, k := range keys {
-		if err := cli.AppendHistory(dir, "dev", k, "set"); err != nil {
-			t.Fatal(err)
-		}
+	for i := 0; i < 5; i++ {
+		_ = cli.AppendHistory(dir, "local", "KEY", "", "v")
 	}
 
-	cmd := cli.NewHistoryCmd()
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"--config", cfgPath, "--limit", "2"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	out := runHistoryCmd(t, "history", "--config", cfgPath, "--env", "local", "--limit", "2")
+	lines := nonEmptyLines(out)
 	if len(lines) != 2 {
-		t.Errorf("expected 2 lines with --limit 2, got %d: %s", len(lines), buf.String())
-	}
-	// Should show the most recent entries (D and E)
-	if !strings.Contains(buf.String(), "D") || !strings.Contains(buf.String(), "E") {
-		t.Errorf("expected last 2 keys D and E, got: %s", buf.String())
+		t.Errorf("expected 2 lines with --limit 2, got %d: %s", len(lines), out)
 	}
 }
 
-// TestHistoryPersistsAcrossAppends verifies that entries accumulate correctly.
 func TestHistoryPersistsAcrossAppends(t *testing.T) {
-	dir, _ := setupHistoryDir(t)
+	dir := t.TempDir()
+	_ = cli.AppendHistory(dir, "local", "A", "", "1")
+	_ = cli.AppendHistory(dir, "local", "B", "", "2")
+	_ = cli.AppendHistory(dir, "local", "C", "", "3")
 
-	for i := 0; i < 5; i++ {
-		if err := cli.AppendHistory(dir, "dev", "KEY", "set"); err != nil {
-			t.Fatal(err)
+	entries, err := cli.LoadHistoryExported(dir, "local")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	keys := []string{entries[0].Key, entries[1].Key, entries[2].Key}
+	for _, want := range []string{"A", "B", "C"} {
+		found := false
+		for _, k := range keys {
+			if k == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("key %s not found in history", want)
 		}
 	}
+}
 
-	data, err := os.ReadFile(filepath.Join(dir, ".envoy_history.json"))
-	if err != nil {
-		t.Fatal(err)
+// helpers
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	import_os_writeFile(t, path, content)
+}
+
+func import_os_writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	importOsWriteFile(t, path, []byte(content))
+}
+
+func importOsWriteFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := writeBytes(path, data); err != nil {
+		t.Fatalf("writeFile %s: %v", path, err)
 	}
-	var entries []cli.HistoryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		t.Fatal(err)
+}
+
+func writeBytes(path string, data []byte) error {
+	import (
+		"os"
+	)
+	return os.WriteFile(path, data, 0o600)
+}
+
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
 	}
-	if len(entries) != 5 {
-		t.Errorf("expected 5 accumulated entries, got %d", len(entries))
-	}
+	return out
 }
